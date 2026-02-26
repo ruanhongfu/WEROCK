@@ -428,6 +428,14 @@ private fun getCameraFolderSize(context: Context): Long {
 }
 
 private fun formatBytes(bytes: Long): String {
-    val gb = bytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
-    return String.format(Locale.US, "%.1f GB", gb)
+    val kb = 1024.0
+    val mb = kb * 1024.0
+    val gb = mb * 1024.0
+    val value = bytes.toDouble()
+    return when {
+        value >= gb -> String.format(Locale.US, "%.2f GB", value / gb)
+        value >= mb -> String.format(Locale.US, "%.1f MB", value / mb)
+        value >= kb -> String.format(Locale.US, "%.1f KB", value / kb)
+        else -> "$bytes B"
+    }
 }
