@@ -277,14 +277,15 @@ private fun CameraPreview(
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                "${if (lensFacing == CameraSelector.LENS_FACING_BACK) "Rear Camera" else "Front Camera"} | $recordingStatus"
+                "${if (lensFacing == CameraSelector.LENS_FACING_BACK) "Rear Camera" else "Front Camera"} | $recordingStatus",
+                color = panelTextColor
             )
             Spacer(modifier = Modifier.height(12.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Zoom ${"%.2f".format(zoomRatio)}x")
+                Text("Zoom ${"%.2f".format(zoomRatio)}x", color = panelTextColor)
                 Spacer(modifier = Modifier.width(12.dp))
                 Text(
                     text = formatBgStatus(lastBgUpdatedAt, nowMillis),
