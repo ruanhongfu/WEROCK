@@ -52,8 +52,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -63,12 +65,15 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview as ComposePreview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.werock.demo.bg.BgHeartbeatWorker
+import com.werock.demo.bg.BgStatusStore
 import com.werock.demo.ui.theme.WEROCKTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -91,6 +96,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         cameraPermissionGranted.value = hasPermission(Manifest.permission.CAMERA)
         mediaPermissionGranted.value = hasMediaReadPermission()
+        BgHeartbeatWorker.start(this)
 
         enableEdgeToEdge()
         setContent {
@@ -179,6 +185,8 @@ private fun CameraPreview(
     var recordingStatus by remember { mutableStateOf("Idle") }
     var storageInfo by remember { mutableStateOf<StorageInfo?>(null) }
     var storageRefreshKey by remember { mutableStateOf(0) }
+    val lastBgUpdatedAt by BgStatusStore.lastUpdatedFlow(context).collectAsState(initial = 0L)
+    var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
     Box(modifier = modifier) {
         AndroidView(
@@ -216,20 +224,6 @@ private fun CameraPreview(
                     Text(if (lensFacing == CameraSelector.LENS_FACING_BACK) "Switch to Front" else "Switch to Rear")
                 }
                 Spacer(modifier = Modifier.width(12.dp))
-                Text(if (lensFacing == CameraSelector.LENS_FACING_BACK) "Rear Camera" else "Front Camera")
-            }
-            Spacer(modifier = Modifier.height(12.dp))
-            Text("Zoom ${"%.2f".format(zoomRatio)}x")
-            Slider(
-                value = zoomRatio,
-                onValueChange = { value ->
-                    zoomRatio = value
-                    boundCamera?.cameraControl?.setZoomRatio(value)
-                },
-                valueRange = minZoomRatio..max(maxZoomRatio, minZoomRatio + 0.01f)
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
                 Button(
                     enabled = videoCaptureUseCase != null,
                     onClick = {
@@ -278,9 +272,34 @@ private fun CameraPreview(
                 ) {
                     Text(if (isRecording) "Stop Recording" else "Start Recording")
                 }
-                Spacer(modifier = Modifier.width(12.dp))
-                Text(recordingStatus)
             }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "${if (lensFacing == CameraSelector.LENS_FACING_BACK) "Rear Camera" else "Front Camera"} | $recordingStatus"
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Zoom ${"%.2f".format(zoomRatio)}x")
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(
+                    text = formatBgStatus(lastBgUpdatedAt, nowMillis),
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Slider(
+                modifier = Modifier.fillMaxWidth(),
+                value = zoomRatio,
+                onValueChange = { value ->
+                    zoomRatio = value
+                    boundCamera?.cameraControl?.setZoomRatio(value)
+                },
+                valueRange = minZoomRatio..max(maxZoomRatio, minZoomRatio + 0.01f)
+            )
         }
 
         GyroOrientationIndicator(
@@ -326,6 +345,13 @@ private fun CameraPreview(
                 getStorageInfo(context, hasMediaPermission)
             }
             delay(10_000)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowMillis = System.currentTimeMillis()
+            delay(1_000)
         }
     }
 
@@ -384,8 +410,9 @@ private fun CameraPreview(
 private fun GyroOrientationIndicator(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val sensorManager = remember {
-        context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
     }
+    if (sensorManager == null) return
     val rotationVectorSensor = remember {
         sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
     }
@@ -555,4 +582,10 @@ private fun formatBytes(bytes: Long): String {
         value >= kb -> String.format(Locale.US, "%.1f KB", value / kb)
         else -> "$bytes B"
     }
+}
+
+private fun formatBgStatus(lastUpdatedMillis: Long, nowMillis: Long): String {
+    if (lastUpdatedMillis <= 0L) return "BG service: waiting"
+    val elapsedSeconds = ((nowMillis - lastUpdatedMillis).coerceAtLeast(0L)) / 1000L
+    return "BG service: update ${elapsedSeconds}s ago"
 }
