@@ -43,6 +43,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.werock.demo.ui.theme.WEROCKTheme
+import kotlin.math.max
 
 class MainActivity : ComponentActivity() {
     private val cameraPermissionGranted = mutableStateOf(false)
@@ -96,7 +97,9 @@ private fun CameraPreview(modifier: Modifier = Modifier) {
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
     var previewView by remember { mutableStateOf<PreviewView?>(null) }
     var lensFacing by remember { mutableStateOf(CameraSelector.LENS_FACING_BACK) }
-    var linearZoom by remember { mutableStateOf(0f) }
+    var zoomRatio by remember { mutableStateOf(1f) }
+    var minZoomRatio by remember { mutableStateOf(1f) }
+    var maxZoomRatio by remember { mutableStateOf(1f) }
     var boundCamera by remember { mutableStateOf<Camera?>(null) }
 
     Box(modifier = modifier) {
@@ -137,14 +140,14 @@ private fun CameraPreview(modifier: Modifier = Modifier) {
                 Text(if (lensFacing == CameraSelector.LENS_FACING_BACK) "Rear Camera" else "Front Camera")
             }
             Spacer(modifier = Modifier.height(12.dp))
-            Text("Zoom")
+            Text("Zoom ${"%.2f".format(zoomRatio)}x")
             Slider(
-                value = linearZoom,
+                value = zoomRatio,
                 onValueChange = { value ->
-                    linearZoom = value
-                    boundCamera?.cameraControl?.setLinearZoom(value)
+                    zoomRatio = value
+                    boundCamera?.cameraControl?.setZoomRatio(value)
                 },
-                valueRange = 0f..1f
+                valueRange = minZoomRatio..max(maxZoomRatio, minZoomRatio + 0.01f)
             )
         }
     }
@@ -164,7 +167,13 @@ private fun CameraPreview(modifier: Modifier = Modifier) {
                 .build()
             cameraProvider?.unbindAll()
             boundCamera = cameraProvider?.bindToLifecycle(lifecycleOwner, cameraSelector, previewUseCase)
-            boundCamera?.cameraControl?.setLinearZoom(linearZoom)
+            val zoomState = boundCamera?.cameraInfo?.zoomState?.value
+            if (zoomState != null) {
+                minZoomRatio = zoomState.minZoomRatio
+                maxZoomRatio = zoomState.maxZoomRatio
+                zoomRatio = zoomRatio.coerceIn(minZoomRatio, maxZoomRatio)
+                boundCamera?.cameraControl?.setZoomRatio(zoomRatio)
+            }
         }
         cameraProviderFuture.addListener(listener, executor)
 
