@@ -1,4 +1,5 @@
 Android Multi-Camera Device Monitor App
+(This is an independent demo project; all trademarks belong to their respective owners.)
 
 An Android application that combines camera control, device/system data monitoring, hardware sensor access, and background task management in a single UI.
 This project is designed as a hands-on demo for Android app development involving:
