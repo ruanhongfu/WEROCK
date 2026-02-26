@@ -1,12 +1,15 @@
 package com.werock.demo
 
 import android.Manifest
+import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.StatFs
+import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -15,6 +18,14 @@ import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview as CameraPreviewUseCase
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.MediaStoreOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -53,7 +64,6 @@ import com.werock.demo.ui.theme.WEROCKTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.util.Locale
 import kotlin.math.max
 
@@ -94,7 +104,8 @@ class MainActivity : ComponentActivity() {
 
     private fun hasMediaReadPermission(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            hasPermission(Manifest.permission.READ_MEDIA_IMAGES)
+            hasPermission(Manifest.permission.READ_MEDIA_IMAGES) &&
+                hasPermission(Manifest.permission.READ_MEDIA_VIDEO)
         } else {
             hasPermission(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
@@ -104,8 +115,12 @@ class MainActivity : ComponentActivity() {
         val permissions = mutableListOf(Manifest.permission.CAMERA)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions += Manifest.permission.READ_MEDIA_IMAGES
+            permissions += Manifest.permission.READ_MEDIA_VIDEO
         } else {
             permissions += Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+            permissions += Manifest.permission.WRITE_EXTERNAL_STORAGE
         }
         return permissions.toTypedArray()
     }
@@ -147,7 +162,12 @@ private fun CameraPreview(
     var minZoomRatio by remember { mutableStateOf(1f) }
     var maxZoomRatio by remember { mutableStateOf(1f) }
     var boundCamera by remember { mutableStateOf<Camera?>(null) }
+    var videoCaptureUseCase by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
+    var activeRecording by remember { mutableStateOf<Recording?>(null) }
+    var isRecording by remember { mutableStateOf(false) }
+    var recordingStatus by remember { mutableStateOf("Idle") }
     var storageInfo by remember { mutableStateOf<StorageInfo?>(null) }
+    var storageRefreshKey by remember { mutableStateOf(0) }
 
     Box(modifier = modifier) {
         AndroidView(
@@ -173,6 +193,7 @@ private fun CameraPreview(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Button(
+                    enabled = !isRecording,
                     onClick = {
                         lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
                             CameraSelector.LENS_FACING_FRONT
@@ -196,6 +217,59 @@ private fun CameraPreview(
                 },
                 valueRange = minZoomRatio..max(maxZoomRatio, minZoomRatio + 0.01f)
             )
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Button(
+                    enabled = videoCaptureUseCase != null,
+                    onClick = {
+                        if (isRecording) {
+                            activeRecording?.stop()
+                        } else {
+                            val capture = videoCaptureUseCase ?: return@Button
+                            val fileName = "WEROCK_${System.currentTimeMillis()}"
+                            val contentValues = ContentValues().apply {
+                                put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
+                                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                                put(
+                                    MediaStore.Video.Media.RELATIVE_PATH,
+                                    "${Environment.DIRECTORY_DCIM}/Camera"
+                                )
+                            }
+                            val outputOptions = MediaStoreOutputOptions.Builder(
+                                context.contentResolver,
+                                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                            )
+                                .setContentValues(contentValues)
+                                .build()
+                            activeRecording = capture.output
+                                .prepareRecording(context, outputOptions)
+                                .start(ContextCompat.getMainExecutor(context)) { event ->
+                                    when (event) {
+                                        is VideoRecordEvent.Start -> {
+                                            isRecording = true
+                                            recordingStatus = "Recording..."
+                                        }
+
+                                        is VideoRecordEvent.Finalize -> {
+                                            isRecording = false
+                                            activeRecording = null
+                                            recordingStatus = if (event.hasError()) {
+                                                "Record failed"
+                                            } else {
+                                                "Saved to DCIM/Camera"
+                                            }
+                                            storageRefreshKey += 1
+                                        }
+                                    }
+                                }
+                        }
+                    }
+                ) {
+                    Text(if (isRecording) "Stop Recording" else "Start Recording")
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(recordingStatus)
+            }
         }
 
         Column(
@@ -228,12 +302,12 @@ private fun CameraPreview(
         }
     }
 
-    LaunchedEffect(hasMediaPermission) {
+    LaunchedEffect(hasMediaPermission, storageRefreshKey) {
         while (true) {
             storageInfo = withContext(Dispatchers.IO) {
                 getStorageInfo(context, hasMediaPermission)
             }
-            delay(5_000)
+            delay(10_000)
         }
     }
 
@@ -247,11 +321,26 @@ private fun CameraPreview(
             val previewUseCase = CameraPreviewUseCase.Builder().build().also { preview ->
                 preview.setSurfaceProvider(view.surfaceProvider)
             }
+            val recorder = Recorder.Builder()
+                .setQualitySelector(
+                    QualitySelector.from(
+                        Quality.HD,
+                        FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)
+                    )
+                )
+                .build()
+            val createdVideoCapture = VideoCapture.withOutput(recorder)
             val cameraSelector = CameraSelector.Builder()
                 .requireLensFacing(lensFacing)
                 .build()
             cameraProvider?.unbindAll()
-            boundCamera = cameraProvider?.bindToLifecycle(lifecycleOwner, cameraSelector, previewUseCase)
+            boundCamera = cameraProvider?.bindToLifecycle(
+                lifecycleOwner,
+                cameraSelector,
+                previewUseCase,
+                createdVideoCapture
+            )
+            videoCaptureUseCase = createdVideoCapture
             val zoomState = boundCamera?.cameraInfo?.zoomState?.value
             if (zoomState != null) {
                 minZoomRatio = zoomState.minZoomRatio
@@ -263,6 +352,10 @@ private fun CameraPreview(
         cameraProviderFuture.addListener(listener, executor)
 
         onDispose {
+            activeRecording?.stop()
+            activeRecording = null
+            isRecording = false
+            videoCaptureUseCase = null
             boundCamera = null
             cameraProvider?.unbindAll()
         }
@@ -292,7 +385,7 @@ private fun getStorageInfo(context: Context, hasMediaPermission: Boolean): Stora
     val totalBytes = statFs.totalBytes
     val freeBytes = statFs.availableBytes
     val cameraBytes = if (hasMediaPermission) {
-        getCameraFolderSize()
+        getCameraFolderSize(context)
     } else {
         null
     }
@@ -303,15 +396,35 @@ private fun getStorageInfo(context: Context, hasMediaPermission: Boolean): Stora
     )
 }
 
-private fun getCameraFolderSize(): Long {
-    val cameraFolder = File(
-        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
-        "Camera"
+private fun getCameraFolderSize(context: Context): Long {
+    val resolver = context.contentResolver
+    val externalUri: Uri = MediaStore.Files.getContentUri("external")
+    val projection = arrayOf(MediaStore.MediaColumns.SIZE)
+    val selection = (
+        "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND " +
+            "(${MediaStore.Files.FileColumns.MEDIA_TYPE}=? OR " +
+            "${MediaStore.Files.FileColumns.MEDIA_TYPE}=?)"
+        )
+    val selectionArgs = arrayOf(
+        "${Environment.DIRECTORY_DCIM}/Camera/",
+        MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
+        MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString()
     )
-    if (!cameraFolder.exists()) return 0L
-    return cameraFolder.walkTopDown()
-        .filter { it.isFile }
-        .sumOf { it.length() }
+    resolver.query(
+        externalUri,
+        projection,
+        selection,
+        selectionArgs,
+        null
+    )?.use { cursor ->
+        val sizeIndex = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
+        var totalSize = 0L
+        while (cursor.moveToNext()) {
+            totalSize += cursor.getLong(sizeIndex)
+        }
+        return totalSize
+    }
+    return 0L
 }
 
 private fun formatBytes(bytes: Long): String {
