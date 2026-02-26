@@ -56,6 +56,7 @@ WRITE_EXTERNAL_STORAGE (legacy Android versions only, if applicable)
 
 Demo
 APK file: https://github.com/ruanhongfu/WEROCK/releases/download/demo/app-debug.apk
+
 Demo video: https://github.com/ruanhongfu/WEROCK/releases/download/demo/demo.mp4
 <img width="1080" height="2160" alt="demo" src="https://github.com/user-attachments/assets/ad1ca066-d8d5-4577-8faf-e6df8a1e4d9c" />
 
