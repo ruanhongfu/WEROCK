@@ -32,6 +32,7 @@ import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -187,6 +188,7 @@ private fun CameraPreview(
     var storageRefreshKey by remember { mutableStateOf(0) }
     val lastBgUpdatedAt by BgStatusStore.lastUpdatedFlow(context).collectAsState(initial = 0L)
     var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    val panelTextColor = if (isSystemInDarkTheme()) Color.White else Color.Black
 
     Box(modifier = modifier) {
         AndroidView(
@@ -286,7 +288,7 @@ private fun CameraPreview(
                 Spacer(modifier = Modifier.width(12.dp))
                 Text(
                     text = formatBgStatus(lastBgUpdatedAt, nowMillis),
-                    color = Color.White,
+                    color = panelTextColor,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
