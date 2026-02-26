@@ -4,6 +4,10 @@ import android.Manifest
 import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -40,20 +44,25 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Card
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview as ComposePreview
 import androidx.compose.ui.unit.dp
@@ -65,7 +74,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import kotlin.math.atan2
 import kotlin.math.max
+import kotlin.math.sqrt
 
 class MainActivity : ComponentActivity() {
     private val cameraPermissionGranted = mutableStateOf(false)
@@ -272,6 +283,13 @@ private fun CameraPreview(
             }
         }
 
+        GyroOrientationIndicator(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .statusBarsPadding()
+                .padding(top = 16.dp, start = 16.dp)
+        )
+
         Column(
             modifier = Modifier
                 .align(Alignment.TopEnd)
@@ -358,6 +376,105 @@ private fun CameraPreview(
             videoCaptureUseCase = null
             boundCamera = null
             cameraProvider?.unbindAll()
+        }
+    }
+}
+
+@Composable
+private fun GyroOrientationIndicator(modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val sensorManager = remember {
+        context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+    }
+    val rotationVectorSensor = remember {
+        sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+    }
+    val gyroscopeSensor = remember {
+        sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+    }
+    var pitchDeg by remember { mutableFloatStateOf(0f) }
+    var rollDeg by remember { mutableFloatStateOf(0f) }
+    var angularSpeed by remember { mutableFloatStateOf(0f) }
+
+    DisposableEffect(sensorManager, rotationVectorSensor, gyroscopeSensor) {
+        val rotationMatrix = FloatArray(9)
+        val orientationAngles = FloatArray(3)
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent) {
+                when (event.sensor.type) {
+                    Sensor.TYPE_ROTATION_VECTOR -> {
+                        SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
+                        SensorManager.getOrientation(rotationMatrix, orientationAngles)
+                        pitchDeg = Math.toDegrees(orientationAngles[1].toDouble()).toFloat()
+                        rollDeg = Math.toDegrees(orientationAngles[2].toDouble()).toFloat()
+                    }
+
+                    Sensor.TYPE_GYROSCOPE -> {
+                        val x = event.values[0]
+                        val y = event.values[1]
+                        val z = event.values[2]
+                        angularSpeed = sqrt(x * x + y * y + z * z)
+                    }
+                }
+            }
+
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+        }
+
+        if (rotationVectorSensor != null) {
+            sensorManager.registerListener(listener, rotationVectorSensor, SensorManager.SENSOR_DELAY_UI)
+        }
+        if (gyroscopeSensor != null) {
+            sensorManager.registerListener(listener, gyroscopeSensor, SensorManager.SENSOR_DELAY_UI)
+        }
+
+        onDispose {
+            sensorManager.unregisterListener(listener)
+        }
+    }
+
+    val tilt = sqrt(pitchDeg * pitchDeg + rollDeg * rollDeg)
+    val arrowColor = when {
+        tilt < 15f -> Color(0xFF31D158)
+        tilt < 35f -> Color(0xFFFFD60A)
+        else -> Color(0xFFFF453A)
+    }
+    val heading = Math.toDegrees(atan2(rollDeg.toDouble(), -pitchDeg.toDouble())).toFloat()
+
+    Card(modifier = modifier) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            androidx.compose.foundation.Canvas(
+                modifier = Modifier
+                    .width(72.dp)
+                    .height(72.dp)
+            ) {
+                val center = Offset(size.width / 2f, size.height / 2f)
+                val arrowLength = size.minDimension * 0.34f
+                drawCircle(
+                    color = Color.Black.copy(alpha = 0.2f),
+                    radius = size.minDimension * 0.48f,
+                    center = center
+                )
+                rotate(degrees = heading, pivot = center) {
+                    drawLine(
+                        color = arrowColor,
+                        start = center,
+                        end = Offset(center.x, center.y - arrowLength),
+                        strokeWidth = 8f
+                    )
+                    val head = Path().apply {
+                        moveTo(center.x, center.y - arrowLength - 10f)
+                        lineTo(center.x - 10f, center.y - arrowLength + 8f)
+                        lineTo(center.x + 10f, center.y - arrowLength + 8f)
+                        close()
+                    }
+                    drawPath(path = head, color = arrowColor)
+                }
+            }
+            Text(
+                text = "Gyro ${"%.2f".format(angularSpeed)} rad/s",
+                style = MaterialTheme.typography.labelSmall
+            )
         }
     }
 }
