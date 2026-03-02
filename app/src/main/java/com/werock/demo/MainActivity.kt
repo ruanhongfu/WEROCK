@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
+import android.media.MediaPlayer
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -14,6 +15,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.StatFs
 import android.provider.MediaStore
+import android.widget.VideoView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -85,6 +87,7 @@ import kotlin.math.max
 import kotlin.math.sqrt
 
 class MainActivity : ComponentActivity() {
+    private val hasAnyCamera = mutableStateOf(true)
     private val cameraPermissionGranted = mutableStateOf(false)
     private val mediaPermissionGranted = mutableStateOf(false)
     private val requestPermissionLauncher =
@@ -95,6 +98,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        hasAnyCamera.value = packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
         cameraPermissionGranted.value = hasPermission(Manifest.permission.CAMERA)
         mediaPermissionGranted.value = hasMediaReadPermission()
         BgHeartbeatWorker.start(this)
@@ -103,6 +107,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             WEROCKTheme {
                 CameraScreen(
+                    hasAnyCamera = hasAnyCamera.value,
                     hasCameraPermission = cameraPermissionGranted.value,
                     hasMediaPermission = mediaPermissionGranted.value,
                     onRequestPermissions = {
@@ -146,11 +151,14 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun CameraScreen(
+    hasAnyCamera: Boolean,
     hasCameraPermission: Boolean,
     hasMediaPermission: Boolean,
     onRequestPermissions: () -> Unit
 ) {
-    if (hasCameraPermission) {
+    if (!hasAnyCamera) {
+        SimulationPreview(modifier = Modifier.fillMaxSize())
+    } else if (hasCameraPermission) {
         CameraPreview(
             modifier = Modifier.fillMaxSize(),
             hasMediaPermission = hasMediaPermission,
@@ -176,6 +184,7 @@ private fun CameraPreview(
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
     var previewView by remember { mutableStateOf<PreviewView?>(null) }
     var lensFacing by remember { mutableStateOf(CameraSelector.LENS_FACING_BACK) }
+    var availableLensFacings by remember { mutableStateOf(setOf<Int>()) }
     var zoomRatio by remember { mutableStateOf(1f) }
     var minZoomRatio by remember { mutableStateOf(1f) }
     var maxZoomRatio by remember { mutableStateOf(1f) }
@@ -184,6 +193,7 @@ private fun CameraPreview(
     var activeRecording by remember { mutableStateOf<Recording?>(null) }
     var isRecording by remember { mutableStateOf(false) }
     var recordingStatus by remember { mutableStateOf("Idle") }
+    var showSimulationPreview by remember { mutableStateOf(false) }
     var storageInfo by remember { mutableStateOf<StorageInfo?>(null) }
     var storageRefreshKey by remember { mutableStateOf(0) }
     val lastBgUpdatedAt by BgStatusStore.lastUpdatedFlow(context).collectAsState(initial = 0L)
@@ -191,14 +201,18 @@ private fun CameraPreview(
     val panelTextColor = if (isSystemInDarkTheme()) Color.White else Color.Black
 
     Box(modifier = modifier) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                PreviewView(ctx).also { view ->
-                    previewView = view
+        if (showSimulationPreview) {
+            SimulationPreview(modifier = Modifier.fillMaxSize())
+        } else {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    PreviewView(ctx).also { view ->
+                        previewView = view
+                    }
                 }
-            }
-        )
+            )
+        }
 
         Column(
             modifier = Modifier
@@ -214,7 +228,7 @@ private fun CameraPreview(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Button(
-                    enabled = !isRecording,
+                    enabled = !isRecording && availableLensFacings.size > 1 && !showSimulationPreview,
                     onClick = {
                         lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
                             CameraSelector.LENS_FACING_FRONT
@@ -227,7 +241,7 @@ private fun CameraPreview(
                 }
                 Spacer(modifier = Modifier.width(12.dp))
                 Button(
-                    enabled = videoCaptureUseCase != null,
+                    enabled = videoCaptureUseCase != null && !showSimulationPreview,
                     onClick = {
                         if (isRecording) {
                             activeRecording?.stop()
@@ -277,7 +291,19 @@ private fun CameraPreview(
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                "${if (lensFacing == CameraSelector.LENS_FACING_BACK) "Rear Camera" else "Front Camera"} | $recordingStatus",
+                buildString {
+                    append(
+                        if (showSimulationPreview) {
+                            "Simulation Preview"
+                        } else if (lensFacing == CameraSelector.LENS_FACING_BACK) {
+                            "Rear Camera"
+                        } else {
+                            "Front Camera"
+                        }
+                    )
+                    append(" | ")
+                    append(recordingStatus)
+                },
                 color = panelTextColor
             )
             Spacer(modifier = Modifier.height(12.dp))
@@ -301,6 +327,7 @@ private fun CameraPreview(
                     zoomRatio = value
                     boundCamera?.cameraControl?.setZoomRatio(value)
                 },
+                enabled = !showSimulationPreview && boundCamera != null,
                 valueRange = minZoomRatio..max(maxZoomRatio, minZoomRatio + 0.01f)
             )
         }
@@ -364,36 +391,79 @@ private fun CameraPreview(
 
         val listener = Runnable {
             val view = previewView ?: return@Runnable
-            cameraProvider = cameraProviderFuture.get()
-            val previewUseCase = CameraPreviewUseCase.Builder().build().also { preview ->
-                preview.setSurfaceProvider(view.surfaceProvider)
-            }
-            val recorder = Recorder.Builder()
-                .setQualitySelector(
-                    QualitySelector.from(
-                        Quality.HD,
-                        FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)
+            runCatching {
+                cameraProvider = cameraProviderFuture.get()
+                val provider = cameraProvider ?: return@runCatching
+                val supportedLensFacings = buildSet {
+                    val backSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                    val frontSelector = CameraSelector.DEFAULT_FRONT_CAMERA
+                    if (provider.hasCamera(backSelector)) add(CameraSelector.LENS_FACING_BACK)
+                    if (provider.hasCamera(frontSelector)) add(CameraSelector.LENS_FACING_FRONT)
+                }
+                availableLensFacings = supportedLensFacings
+                if (supportedLensFacings.isEmpty()) {
+                    showSimulationPreview = true
+                    recordingStatus = "Camera unavailable"
+                    provider.unbindAll()
+                    boundCamera = null
+                    videoCaptureUseCase = null
+                    return@runCatching
+                }
+
+                val resolvedLensFacing = when {
+                    supportedLensFacings.contains(lensFacing) -> lensFacing
+                    supportedLensFacings.contains(CameraSelector.LENS_FACING_BACK) -> CameraSelector.LENS_FACING_BACK
+                    else -> CameraSelector.LENS_FACING_FRONT
+                }
+                if (resolvedLensFacing != lensFacing) {
+                    lensFacing = resolvedLensFacing
+                    return@runCatching
+                }
+
+                val previewUseCase = CameraPreviewUseCase.Builder().build().also { preview ->
+                    preview.setSurfaceProvider(view.surfaceProvider)
+                }
+                val recorder = Recorder.Builder()
+                    .setQualitySelector(
+                        QualitySelector.from(
+                            Quality.HD,
+                            FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)
+                        )
                     )
+                    .build()
+                val createdVideoCapture = VideoCapture.withOutput(recorder)
+                val cameraSelector = CameraSelector.Builder()
+                    .requireLensFacing(lensFacing)
+                    .build()
+                provider.unbindAll()
+                boundCamera = provider.bindToLifecycle(
+                    lifecycleOwner,
+                    cameraSelector,
+                    previewUseCase,
+                    createdVideoCapture
                 )
-                .build()
-            val createdVideoCapture = VideoCapture.withOutput(recorder)
-            val cameraSelector = CameraSelector.Builder()
-                .requireLensFacing(lensFacing)
-                .build()
-            cameraProvider?.unbindAll()
-            boundCamera = cameraProvider?.bindToLifecycle(
-                lifecycleOwner,
-                cameraSelector,
-                previewUseCase,
-                createdVideoCapture
-            )
-            videoCaptureUseCase = createdVideoCapture
-            val zoomState = boundCamera?.cameraInfo?.zoomState?.value
-            if (zoomState != null) {
-                minZoomRatio = zoomState.minZoomRatio
-                maxZoomRatio = zoomState.maxZoomRatio
-                zoomRatio = zoomRatio.coerceIn(minZoomRatio, maxZoomRatio)
-                boundCamera?.cameraControl?.setZoomRatio(zoomRatio)
+                showSimulationPreview = false
+                if (recordingStatus == "Camera unavailable") {
+                    recordingStatus = "Idle"
+                }
+                videoCaptureUseCase = createdVideoCapture
+                val zoomState = boundCamera?.cameraInfo?.zoomState?.value
+                if (zoomState != null) {
+                    minZoomRatio = zoomState.minZoomRatio
+                    maxZoomRatio = zoomState.maxZoomRatio
+                    zoomRatio = zoomRatio.coerceIn(minZoomRatio, maxZoomRatio)
+                    boundCamera?.cameraControl?.setZoomRatio(zoomRatio)
+                }
+            }.onFailure {
+                showSimulationPreview = true
+                availableLensFacings = emptySet()
+                recordingStatus = "Camera unavailable"
+                activeRecording?.close()
+                activeRecording = null
+                isRecording = false
+                boundCamera = null
+                videoCaptureUseCase = null
+                cameraProvider?.unbindAll()
             }
         }
         cameraProviderFuture.addListener(listener, executor)
@@ -410,6 +480,35 @@ private fun CameraPreview(
 }
 
 @Composable
+private fun SimulationPreview(modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val videoUri = remember(context) {
+        Uri.parse("android.resource://${context.packageName}/${R.raw.simulation_loop}")
+    }
+
+    AndroidView(
+        modifier = modifier,
+        factory = { ctx ->
+            VideoView(ctx).apply {
+                setVideoURI(videoUri)
+                setOnPreparedListener { player: MediaPlayer ->
+                    player.isLooping = true
+                    start()
+                }
+                setOnErrorListener { _, _, _ -> true }
+                start()
+            }
+        },
+        update = { view ->
+            if (!view.isPlaying) {
+                view.setVideoURI(videoUri)
+                view.start()
+            }
+        }
+    )
+}
+
+@Composable
 private fun GyroOrientationIndicator(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val sensorManager = remember {
@@ -421,6 +520,15 @@ private fun GyroOrientationIndicator(modifier: Modifier = Modifier) {
     }
     val gyroscopeSensor = remember {
         sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+    }
+    if (rotationVectorSensor == null && gyroscopeSensor == null) {
+        Card(modifier = modifier) {
+            Column(modifier = Modifier.padding(10.dp)) {
+                Text("Sensor")
+                Text("Unavailable", style = MaterialTheme.typography.labelSmall)
+            }
+        }
+        return
     }
     var pitchDeg by remember { mutableFloatStateOf(0f) }
     var rollDeg by remember { mutableFloatStateOf(0f) }
@@ -514,6 +622,7 @@ private fun GyroOrientationIndicator(modifier: Modifier = Modifier) {
 fun CameraScreenPreview() {
     WEROCKTheme {
         CameraScreen(
+            hasAnyCamera = true,
             hasCameraPermission = false,
             hasMediaPermission = false,
             onRequestPermissions = {}
